@@ -1,0 +1,21 @@
+[package]
+name = "nssm_exec"
+version = "0.1.0"
+authors = ["Chen Weiguang <chen.weiguang@gmail.com>"]
+
+[dependencies]
+derive-error-chain = "=0.10.1"
+error-chain = "=0.10.0"
+file = "=1.1.1"
+log = "=0.3.8"
+log4rs = "=0.7.0"
+serde = "=1.0.10"
+serde_derive = "=1.0.10"
+simple_logger = "=0.4.0"
+structopt = "=0.1.0"
+structopt-derive = "=0.1.0"
+toml = "=0.4.2"
+
+[[bin]]
+name = "nssm_exec"
+path = "src/main.rs"
