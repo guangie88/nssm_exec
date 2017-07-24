@@ -146,7 +146,7 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
             }
 
             // install service first
-            let install_cmd = format!(r#"install {} "{}""#, service.name, service.path.to_string_lossy());
+            let install_cmd = format!("install {} {}", service.name, service.path.to_string_lossy());
             create_nssm_cmd(install_cmd).chain_err(|| "Unable to install service")?;
 
             // then set the rest of the parameters
