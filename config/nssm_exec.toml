@@ -1,0 +1,38 @@
+nssm_path = 'third-party\nssm.exe'
+
+# [[services]]
+# name: String = "service_name"
+# path: String = "path_to_exe"
+# args: Option<String> = "arg1 arg2 arg3"
+# deps: Option<String> = "dep1 dep2 dep3", if None => global deps
+# account: Option<Account>
+
+[global]
+deps = "Tcpip"
+start_on_create = true
+
+# [global.account]
+# user = '.\Shirayuki'
+# password = ""
+
+[[services]]
+name = "_A"
+path = 'D:\Downloads\GitForWindows\usr\bin\sleep.exe'
+args = "10"
+description = "This is program A"
+
+ [service.other]
+ deps = "Tcpip"
+ start_on_create = false
+ account = { user = '.\Shirayuki', password = "" }
+
+[[services]]
+name = "_B"
+path = 'D:\Downloads\GitForWindows\usr\bin\sleep.exe'
+args = "30"
+
+[[services]]
+name = "_C"
+path = 'D:\Downloads\GitForWindows\usr\bin\sleep.exe'
+args = "20"
+description = "This is program C"
