@@ -1,5 +1,5 @@
-#[macro_use] extern crate error_chain;
 #[macro_use] extern crate derive_error_chain;
+#[macro_use] extern crate error_chain;
 extern crate file;
 #[macro_use] extern crate log;
 extern crate log4rs;
@@ -60,7 +60,7 @@ struct MainConfig {
 }
 
 mod errors {
-    #[derive(Debug, error_chain)]
+    #[derive(Debug, ErrorChain)]
     pub enum ErrorKind {
         Msg(String)
     }
