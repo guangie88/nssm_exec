@@ -1,38 +1,109 @@
 nssm_path = 'third-party\nssm.exe'
-
-# [[services]]
-# name: String = "service_name"
-# path: String = "path_to_exe"
-# args: Option<String> = "arg1 arg2 arg3"
-# deps: Option<String> = "dep1 dep2 dep3", if None => global deps
-# account: Option<Account>
+pending_stop_poll_ms = 500
+pending_stop_poll_count = 10
 
 [global]
 deps = "Tcpip"
 start_on_create = true
 
 # [global.account]
-# user = '.\Shirayuki'
-# password = ""
+# user = "<some_username>"
+# password = "<some_password>"
 
 [[services]]
 name = "_A"
-path = 'D:\Downloads\GitForWindows\usr\bin\sleep.exe'
-args = "10"
+path = 'third-party\five_ctrl_c.exe'
+startup_dir = 'third-party'
 description = "This is program A"
 
- [service.other]
+ [services.other]
  deps = "Tcpip"
- start_on_create = false
- account = { user = '.\Shirayuki', password = "" }
+ start_on_create = true
+#  account = { user = "<some_username>", password = "some_password" }
 
 [[services]]
 name = "_B"
-path = 'D:\Downloads\GitForWindows\usr\bin\sleep.exe'
-args = "30"
+path = 'third-party\five_ctrl_c.exe'
+args = "noeffect"
 
 [[services]]
 name = "_C"
-path = 'D:\Downloads\GitForWindows\usr\bin\sleep.exe'
-args = "20"
+path = 'third-party\five_ctrl_c.exe'
+args = "noeffect"
 description = "This is program C"
+
+# Below contains the Rust + serde based TOML semantics
+
+# /// Groups the Windows account settings for running a service.
+# #[derive(Deserialize)]
+# struct Account {
+#     /// Windows account username.
+#     user: String,
+
+#     /// Password corresponding to the username.
+#     /// May be left as empty string if username does not require password.
+#     password: String,
+# }
+
+# /// Groups the extra configurations required for configuring the service.
+# /// May be used on every service or in a global context.
+# #[derive(Deserialize)]
+# struct OtherConfig {
+#     /// List of other service names to depend on before starting this service.
+#     /// Multiple service names are space delimited.
+#     deps: Option<String>,
+
+#     /// States whether to immediately start the created service.
+#     /// Defaults to false.
+#     start_on_create: Option<bool>,
+
+#     /// Holds the account configuration to run the service.
+#     account: Option<Account>,
+# }
+
+# /// Groups the configurations required for a service.
+# #[derive(Deserialize)]
+# struct Service {
+#     /// Name of service.
+#     name: String,
+
+#     /// Service executable file path.
+#     path: PathBuf,
+
+#     /// Service startup directory path. Leaving empty should use the directory path
+#     /// containing the executable.
+#     startup_dir: Option<PathBuf>,
+
+#     /// Arguments to be passed into the executable. Multiple arguments are space delimited and
+#     /// arguments may be wrapped around double quotes like in cmd.
+#     args: Option<String>,
+
+#     /// Description string of service.
+#     description: Option<String>,
+
+#     /// Holds the extra configurations.
+#     /// Any specific extra configurations will always override the global ones.
+#     other: Option<OtherConfig>,
+# }
+
+# /// Represents the TOML nssm_exec configuration.
+# #[derive(Deserialize)]
+# struct FileConfig {
+#     /// NSSM executable file path
+#     nssm_path: PathBuf,
+
+#     /// Interval in milliseconds before retrying to check if the service has stopped.
+#     /// Default is 500. Only applicable if there is any running existing service.
+#     pending_stop_poll_ms: Option<u64>,
+
+#     /// Number of retries to check if the service has stopped.
+#     /// Default is 5. Only applicable if there is any running existing service.
+#     pending_stop_poll_count: Option<u64>,
+
+#     /// Holds the global extra configurations.
+#     /// Any specific extra configurations will always override the global ones.
+#     global: Option<OtherConfig>,
+
+#     /// Holds the service configurations.
+#     services: Vec<Service>,
+# }

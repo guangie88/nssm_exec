@@ -1,6 +1,6 @@
 [package]
 name = "nssm_exec"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Chen Weiguang <chen.weiguang@gmail.com>"]
 
 [dependencies]
