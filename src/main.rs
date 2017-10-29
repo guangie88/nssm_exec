@@ -15,6 +15,7 @@ extern crate structopt;
 extern crate structopt_derive;
 extern crate toml;
 
+use std::fmt::Display;
 use std::thread;
 use std::time::Duration;
 use std::path::PathBuf;
@@ -127,6 +128,19 @@ const SERVICE_STOPPED_STATUS: &str = "SERVICE_STOPPED";
 const PENDING_STOP_POLL_MS_DEF: u64 = 500;
 const PENDING_STOP_POLL_COUNT_DEF: u64 = 5;
 
+trait ChainService<T> {
+    fn chain_service_msg(self, description: &str, service_name: &str) -> Result<T>;
+}
+
+impl<T, E> ChainService<T> for std::result::Result<T, E>
+where
+    E: std::error::Error + Send + 'static,
+{
+    fn chain_service_msg(self, description: &str, service_name: &str) -> Result<T> {
+        self.chain_err(|| format!("{} service '{}'", description, service_name))
+    }
+}
+
 fn run_cmd(cmd: &str) -> Result<Output> {
     debug!("{}", cmd);
 
@@ -166,6 +180,30 @@ fn run_nssm_set_cmd(cmd: &str, file_config: &FileConfig) -> Result<Output> {
     run_nssm_cmd(&format!("set {}", cmd), file_config)
 }
 
+fn run_nssm_set_cmd_if_some<T>(
+    service_name: &str,
+    field_name: &str,
+    param: &Option<T>,
+    file_config: &FileConfig,
+) -> Result<()>
+where
+    T: Display,
+{
+    if let Some(ref param) = *param {
+        let param_cmd = &format!("{} {} {}", service_name, field_name, param);
+
+        run_nssm_set_cmd(param_cmd, file_config).chain_service_msg(
+            &format!(
+                "Unable to set '{}' for",
+                field_name
+            ),
+            service_name,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn run_nssm_status_cmd(cmd: &str, file_config: &FileConfig) -> Result<Output> {
     run_nssm_cmd(&format!("status {}", cmd), file_config)
 }
@@ -175,7 +213,12 @@ fn run_nssm_status_cmd_extract_status(cmd: &str, file_config: &FileConfig) -> Re
         let stdout = remove_zeros(&output.stdout);
 
         let status = std::str::from_utf8(&stdout)
-            .chain_err(|| "Unable to get convert from utf8 into status string")?
+            .chain_err(|| {
+                format!(
+                    "Unable to get convert from utf8 '{:?}' into status string",
+                    stdout
+                )
+            })?
             .trim()
             .to_owned();
 
@@ -196,11 +239,17 @@ fn poll_service_status_until_empty(
             .unwrap_or(false);
 
         if !has_stopped {
+            info!(
+                "Service '{}' still in pending stop state, waiting for it to stop...",
+                service_name
+            );
+            
             thread::sleep(poll_interval.clone());
         }
 
         has_stopped
     });
+
 
     if !has_stopped {
         bail!(
@@ -256,8 +305,9 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                 if status != SERVICE_STOPPED_STATUS {
                     let stop_cmd = &format!("stop {}", service.name);
 
-                    run_nssm_cmd(stop_cmd, file_config).chain_err(
-                        || "Unable to stop service",
+                    run_nssm_cmd(stop_cmd, file_config).chain_service_msg(
+                        "Unable to stop",
+                        &service.name,
                     )?;
                 }
 
@@ -271,20 +321,21 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
 
                 let remove_cmd = &format!("remove {} confirm", service.name);
 
-                run_nssm_cmd(remove_cmd, file_config).chain_err(
-                    || "Unable to remove service",
+                run_nssm_cmd(remove_cmd, file_config).chain_service_msg(
+                    "Unable to remove",
+                    &service.name,
                 )?;
             }
 
             // since nssm cannot use relative paths
             // must canonicalize the app path first
-            let service_path_canon = service.path.canonicalize().chain_err(|| {
-                format!(
-                    "Unable to canonicalize path '{}' for service '{}'",
-                    service.path.to_string_lossy(),
-                    service.name
-                )
-            })?;
+            let service_path_canon = service.path.canonicalize().chain_service_msg(
+                &format!(
+                    "Unable to canonicalize path '{}' for",
+                    service.path.to_string_lossy()
+                ),
+                &service.name,
+            )?;
 
             // install service first
             let install_cmd = &format!(
@@ -293,20 +344,21 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                 service_path_canon.to_string_lossy(),
             );
 
-            run_nssm_cmd(install_cmd, file_config).chain_err(
-                || "Unable to install service",
+            run_nssm_cmd(install_cmd, file_config).chain_service_msg(
+                "Unable to install",
+                &service.name,
             )?;
 
             // then set the rest of the parameters
             if let Some(ref startup_dir) = service.startup_dir {
                 // same for app directory
-                let startup_dir_canon = startup_dir.canonicalize().chain_err(|| {
-                    format!(
-                        "Unable to canonicalize startup dir '{}' for service '{}'",
+                let startup_dir_canon = startup_dir.canonicalize().chain_service_msg(
+                    &format!(
+                        "Unable to canonicalize startup directory path '{}' for",
                         startup_dir.to_string_lossy(),
-                        service.name
-                    )
-                })?;
+                    ),
+                    &service.name,
+                )?;
 
                 let app_dir_cmd = &format!(
                     "{} AppDirectory {}",
@@ -314,26 +366,18 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                     startup_dir_canon.to_string_lossy()
                 );
 
-                run_nssm_set_cmd(app_dir_cmd, file_config).chain_err(
-                    || "Unable to set startup directory to service",
-                )?;
+                run_nssm_set_cmd(app_dir_cmd, file_config)
+                    .chain_service_msg("Unable to set startup directory for", &service.name)?;
             }
 
-            if let Some(ref args) = service.args {
-                let params_cmd = &format!("{} AppParameters {}", service.name, args);
+            run_nssm_set_cmd_if_some(&service.name, "AppParameters", &service.args, file_config)?;
 
-                run_nssm_set_cmd(params_cmd, file_config).chain_err(
-                    || "Unable to set arguments to service",
-                )?;
-            }
-
-            if let Some(ref description) = service.description {
-                let description_cmd = &format!("{} Description {}", service.name, description);
-
-                run_nssm_set_cmd(description_cmd, file_config).chain_err(
-                    || "Unable to set description to service",
-                )?;
-            }
+            run_nssm_set_cmd_if_some(
+                &service.name,
+                "Description",
+                &service.description,
+                file_config,
+            )?;
 
             // merges the options, prioritizing the local ones if available individually
             let merged_other = OtherConfigRef {
@@ -350,12 +394,12 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                 }),
             };
 
-            if let Some(deps) = merged_other.deps {
-                let deps_cmd = &format!("{} DependOnService {}", service.name, deps);
-                run_nssm_set_cmd(deps_cmd, file_config).chain_err(
-                    || "Unable to set dependencies to service",
-                )?;
-            };
+            run_nssm_set_cmd_if_some(
+                &service.name,
+                "DependOnService",
+                &merged_other.deps,
+                file_config,
+            )?;
 
             if let Some(account) = merged_other.account {
                 let acct_cmd = &format!(
@@ -368,16 +412,19 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                         r#""""#
                     }
                 );
-                run_nssm_set_cmd(acct_cmd, file_config).chain_err(
-                    || "Unable to set the username and password to service",
+                run_nssm_set_cmd(acct_cmd, file_config).chain_service_msg(
+                    "Unable to set the username and password for",
+                    &service.name,
                 )?;
             }
 
             if let Some(start_on_create) = merged_other.start_on_create {
                 if *start_on_create {
                     let start_cmd = &format!("start {}", service.name);
-                    run_nssm_cmd(start_cmd, file_config).chain_err(
-                        || "Unable to start service",
+
+                    run_nssm_cmd(start_cmd, file_config).chain_service_msg(
+                        "Unable to start",
+                        &service.name,
                     )?;
                 }
             }
