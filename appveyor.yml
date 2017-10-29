@@ -38,10 +38,16 @@ install:
   - set PATH=%PATH%;C:\Users\appveyor\.cargo\bin
   - rustc -Vv
   - cargo -V
-  # Based on https://www.appveyor.com/docs/build-environment/#mingw-msys-cygwin
-  - if "%TARGET%"=="i686-pc-windows-gnu" set PATH=%PATH%;C:\mingw-w64\i686-6.3.0-posix-dwarf-rt_v5-rev1\bin
-  - if "%TARGET%"=="x86_64-pc-windows-gnu" set PATH=%PATH%;C:\mingw-w64\x86_64-6.3.0-posix-seh-rt_v5-rev1\bin
-  - gcc --version
+  - if "%TARGET%"=="i686-pc-windows-gnu" (
+      cinst mingw --x86 -y
+      set PATH=%PATH%;C:\tools\mingw32\bin
+      gcc --version
+    )
+  - if "%TARGET%"=="x86_64-pc-windows-gnu" (
+      cinst mingw -y
+      set PATH=%PATH%;C:\tools\mingw64\bin
+      gcc --version
+    )
   - echo %PATH%
 
 # 'cargo test' takes care of building for us, so disable Appveyor's build stage. This prevents
