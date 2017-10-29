@@ -38,16 +38,14 @@ install:
   - set PATH=%PATH%;C:\Users\appveyor\.cargo\bin
   - rustc -Vv
   - cargo -V
-  - if "%TARGET%"=="i686-pc-windows-gnu" (
-      cinst mingw --x86 -y
-      set PATH=%PATH%;C:\tools\mingw32\bin
+  - if "%TARGET%"=="i686-pc-windows-gnu"
+      cinst mingw --x86 -y &
+      set "PATH=%PATH%;C:\tools\mingw32\bin" &
       gcc --version
-    )
-  - if "%TARGET%"=="x86_64-pc-windows-gnu" (
-      cinst mingw -y
-      set PATH=%PATH%;C:\tools\mingw64\bin
+  - if "%TARGET%"=="x86_64-pc-windows-gnu"
+      cinst mingw -y &
+      set "PATH=%PATH%;C:\tools\mingw64\bin" &
       gcc --version
-    )
   - echo %PATH%
 
 # 'cargo test' takes care of building for us, so disable Appveyor's build stage. This prevents
@@ -66,3 +64,4 @@ test_script:
 branches:
   only:
     - master
+    - experimental

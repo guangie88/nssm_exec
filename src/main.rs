@@ -123,7 +123,6 @@ mod errors {
 
 use errors::*;
 
-const SERVICE_STOP_PENDING_STATUS: &str = "SERVICE_STOP_PENDING";
 const SERVICE_STOPPED_STATUS: &str = "SERVICE_STOPPED";
 const PENDING_STOP_POLL_MS_DEF: u64 = 500;
 const PENDING_STOP_POLL_COUNT_DEF: u64 = 5;
@@ -235,21 +234,20 @@ fn poll_service_status_until_empty(
 
     let has_stopped = (0..poll_count).any(|_| {
         let has_stopped = run_nssm_status_cmd_extract_status(service_name, file_config)
-            .map(|status| status != SERVICE_STOP_PENDING_STATUS)
+            .map(|status| status == SERVICE_STOPPED_STATUS)
             .unwrap_or(false);
 
         if !has_stopped {
             info!(
-                "Service '{}' still in pending stop state, waiting for it to stop...",
+                "Service '{}' is still not completely stopped, waiting...",
                 service_name
             );
-            
+
             thread::sleep(poll_interval.clone());
         }
 
         has_stopped
     });
-
 
     if !has_stopped {
         bail!(
@@ -305,19 +303,28 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                 if status != SERVICE_STOPPED_STATUS {
                     let stop_cmd = &format!("stop {}", service.name);
 
-                    run_nssm_cmd(stop_cmd, file_config).chain_service_msg(
-                        "Unable to stop",
+                    // sometimes the error message happens
+                    // "Unexpected status SERVICE_STOP_PENDING in response to STOP control"
+                    // even though the service will eventually stop
+                    // so allow for this to happen
+
+                    let stop_res = run_nssm_cmd(stop_cmd, file_config).chain_service_msg(
+                        "Stopping of service returned error, but temporarily allowing for",
                         &service.name,
+                    );
+
+                    if let Err(e) = stop_res {
+                        print_recursive_warning(&e);
+                    }
+
+                    // sometimes it takes a while to stop the service so wait for it
+                    poll_service_status_until_empty(
+                        &service.name,
+                        file_config,
+                        &pending_stop_poll_interval,
+                        pending_stop_poll_count,
                     )?;
                 }
-
-                // sometimes it takes a while to stop the service so wait for it
-                poll_service_status_until_empty(
-                    &service.name,
-                    file_config,
-                    &pending_stop_poll_interval,
-                    pending_stop_poll_count,
-                )?;
 
                 let remove_cmd = &format!("remove {} confirm", service.name);
 
@@ -484,6 +491,14 @@ fn run() -> Result<()> {
     )?;
 
     Ok(())
+}
+
+fn print_recursive_warning(e: &Error) {
+    warn!("WARNING: {}", e);
+
+    for e in e.iter().skip(1) {
+        warn!("> Caused by: {}", e);
+    }
 }
 
 fn print_recursive_err(e: &Error) {
