@@ -1,6 +1,8 @@
 nssm_path = 'third-party\nssm.exe'
 pending_stop_poll_ms = 500
 pending_stop_poll_count = 10
+pending_start_poll_ms = 500
+pending_start_poll_count = 10
 
 [global]
 deps = "Tcpip"
@@ -10,10 +12,14 @@ start_on_create = true
 # user = "<some_username>"
 # password = "<some_password>"
 
+# services path is recommended to be absolute path
+# but using a relative path is still possible
+# note that the relative path starts from the directory containing the nssm.exe
+
 [[services]]
 name = "_A"
-path = 'third-party\five_ctrl_c.exe'
-startup_dir = 'third-party'
+path = 'five_ctrl_c.exe'
+startup_dir = './'
 description = "This is program A"
 
  [services.other]
@@ -23,12 +29,12 @@ description = "This is program A"
 
 [[services]]
 name = "_B"
-path = 'third-party\five_ctrl_c.exe'
+path = 'five_ctrl_c.exe'
 args = "noeffect"
 
 [[services]]
 name = "_C"
-path = 'third-party\five_ctrl_c.exe'
+path = 'five_ctrl_c.exe'
 args = "noeffect"
 description = "This is program C"
 
@@ -99,6 +105,14 @@ description = "This is program C"
 #     /// Number of retries to check if the service has stopped.
 #     /// Default is 5. Only applicable if there is any running existing service.
 #     pending_stop_poll_count: Option<u64>,
+
+#     /// Interval in milliseconds before retrying to check if the service has started.
+#     /// Default is 500. Only applicable if there is any running existing service.
+#     pending_start_poll_ms: Option<u64>,
+
+#     /// Number of retries to check if the service has started.
+#     /// Default is 5. Only applicable if there is any running existing service.
+#     pending_start_poll_count: Option<u64>,
 
 #     /// Holds the global extra configurations.
 #     /// Any specific extra configurations will always override the global ones.

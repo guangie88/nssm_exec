@@ -3,6 +3,9 @@ extern crate derive_error_chain;
 #[macro_use]
 extern crate error_chain;
 extern crate file;
+extern crate itertools;
+#[macro_use]
+extern crate lazy_static;
 #[macro_use]
 extern crate log;
 extern crate log4rs;
@@ -15,6 +18,7 @@ extern crate structopt;
 extern crate structopt_derive;
 extern crate toml;
 
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::thread;
 use std::time::Duration;
@@ -94,6 +98,14 @@ struct FileConfig {
     /// Default is 5. Only applicable if there is any running existing service.
     pending_stop_poll_count: Option<u64>,
 
+    /// Interval in milliseconds before retrying to check if the service has started.
+    /// Default is 500. Only applicable if there is any running existing service.
+    pending_start_poll_ms: Option<u64>,
+
+    /// Number of retries to check if the service has started.
+    /// Default is 5. Only applicable if there is any running existing service.
+    pending_start_poll_count: Option<u64>,
+
     /// Holds the global extra configurations.
     /// Any specific extra configurations will always override the global ones.
     global: Option<OtherConfig>,
@@ -103,15 +115,72 @@ struct FileConfig {
 }
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "NSSM Executor", about = "Program to facilitate easy adding of nssm services.")]
+#[structopt(name = "NSSM Executor")]
+/// Program to facilitate easy adding of nssm services.
 struct MainConfig {
-    #[structopt(short = "c", long = "conf", help = "TOML configuration to set up nssm",
-                default_value = "config/nssm_exec.toml")]
+    #[structopt(short = "c", long = "conf", default_value = "config/nssm_exec.toml")]
+    /// TOML configuration to set up NSSM
     config_path: String,
 
-    #[structopt(short = "l", long = "log", help = "Logging configuration file path",
-                default_value = "config/logging_nssm_exec.yml")]
+    #[structopt(short = "l", long = "log", default_value = "config/logging_nssm_exec.yml")]
+    /// Logging configuration file path
     log_config_path: Option<String>,
+
+    #[structopt(subcommand)]
+    /// Possible other specialized commands to use
+    cmd: Option<CustomCmd>,
+}
+
+#[derive(StructOpt, Debug)]
+enum CustomCmd {
+    #[structopt(name = "stop")]
+    /// Only runs the stop command on the services in the TOML configuration
+    Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ServiceState {
+    /// SERVICE_CONTINUE_PENDING (0x00000005)
+    /// The service continue is pending.
+    ContinuePending,
+
+    /// SERVICE_PAUSE_PENDING (0x00000006)
+    /// The service pause is pending.
+    PausePending,
+
+    /// SERVICE_PAUSED (0x00000007)
+    /// The service is paused.
+    Paused,
+
+    /// SERVICE_RUNNING (0x00000004)
+    /// The service is running.
+    Running,
+
+    /// SERVICE_START_PENDING (0x00000002)
+    /// The service is starting.
+    StartPending,
+
+    /// SERVICE_STOP_PENDING (0x00000003)
+    /// The service is stopping.
+    StopPending,
+
+    /// SERVICE_STOPPED (0x00000001)
+    /// The service is not running.
+    Stopped,
+}
+
+lazy_static! {
+    static ref STATE_MAP: HashMap<&'static str, ServiceState> = {
+        let mut m = HashMap::new();
+        m.insert("SERVICE_CONTINUE_PENDING", ServiceState::ContinuePending);
+        m.insert("SERVICE_PAUSE_PENDING", ServiceState::PausePending);
+        m.insert("SERVICE_PAUSED", ServiceState::Paused);
+        m.insert("SERVICE_RUNNING", ServiceState::Running);
+        m.insert("SERVICE_START_PENDING", ServiceState::StartPending);
+        m.insert("SERVICE_STOP_PENDING", ServiceState::StopPending);
+        m.insert("SERVICE_STOPPED", ServiceState::Stopped);
+        m
+    };
 }
 
 mod errors {
@@ -123,9 +192,8 @@ mod errors {
 
 use errors::*;
 
-const SERVICE_STOPPED_STATUS: &str = "SERVICE_STOPPED";
-const PENDING_STOP_POLL_MS_DEF: u64 = 500;
-const PENDING_STOP_POLL_COUNT_DEF: u64 = 5;
+const PENDING_POLL_DEFAULT_MS: u64 = 500;
+const PENDING_POLL_DEFAULT_COUNT: u64 = 5;
 
 trait ChainService<T> {
     fn chain_service_msg(self, description: &str, service_name: &str) -> Result<T>;
@@ -138,6 +206,20 @@ where
     fn chain_service_msg(self, description: &str, service_name: &str) -> Result<T> {
         self.chain_err(|| format!("{} service '{}'", description, service_name))
     }
+}
+
+fn state_from_str(status: &str) -> Result<ServiceState> {
+    let state = STATE_MAP
+        .get(status)
+        .map(|state| state.clone())
+        .ok_or_else(|| {
+            format!(
+                "Unable to obtain valid state from status string '{}'",
+                status
+            )
+        })?;
+
+    Ok(state)
 }
 
 fn run_cmd(cmd: &str) -> Result<Output> {
@@ -207,7 +289,7 @@ fn run_nssm_status_cmd(cmd: &str, file_config: &FileConfig) -> Result<Output> {
     run_nssm_cmd(&format!("status {}", cmd), file_config)
 }
 
-fn run_nssm_status_cmd_extract_status(cmd: &str, file_config: &FileConfig) -> Result<String> {
+fn run_nssm_status_cmd_extract_status(cmd: &str, file_config: &FileConfig) -> Result<ServiceState> {
     run_nssm_status_cmd(cmd, file_config).and_then(|output| {
         let stdout = remove_zeros(&output.stdout);
 
@@ -218,38 +300,42 @@ fn run_nssm_status_cmd_extract_status(cmd: &str, file_config: &FileConfig) -> Re
                     stdout
                 )
             })?
-            .trim()
-            .to_owned();
+            .trim();
 
-        Ok(status)
+        state_from_str(&status)
     })
 }
 
-fn poll_service_status_until_empty(
+fn poll_service_state_until(
     service_name: &str,
     file_config: &FileConfig,
     poll_interval: &Duration,
     poll_count: u64,
+    expected_state: ServiceState,
 ) -> Result<()> {
 
-    let has_stopped = (0..poll_count).any(|_| {
-        let has_stopped = run_nssm_status_cmd_extract_status(service_name, file_config)
-            .map(|status| status == SERVICE_STOPPED_STATUS)
-            .unwrap_or(false);
-
-        if !has_stopped {
-            info!(
-                "Service '{}' is still not completely stopped, waiting...",
-                service_name
-            );
-
-            thread::sleep(poll_interval.clone());
-        }
-
-        has_stopped
+    let status_check_iter = (0..poll_count).map(|_| {
+        run_nssm_status_cmd_extract_status(service_name, file_config)
+            .map(|status| status == expected_state)
+            .unwrap_or(false)
     });
 
-    if !has_stopped {
+    // starts from 1 to reduce the count by 1 and prevent underflow
+    let between_delay_iter = (1..poll_count).map(|_| {
+        info!(
+            "Service '{}' is still not in state {:?}, waiting...",
+            service_name,
+            expected_state
+        );
+
+        thread::sleep(poll_interval.clone());
+        false
+    });
+
+    let state_reached = itertools::interleave(status_check_iter, between_delay_iter)
+        .any(|reached| reached);
+
+    if !state_reached {
         bail!(
             "Unable to wait for service name '{}' to stop completely",
             service_name
@@ -275,7 +361,7 @@ where
 fn remove_zeros(bytes: &[u8]) -> Vec<u8> {
     bytes
         .iter()
-        .filter(|c| **c != 0)
+        .filter(|&c| *c != 0)
         .map(|c| c.clone())
         .collect()
 }
@@ -283,11 +369,20 @@ fn remove_zeros(bytes: &[u8]) -> Vec<u8> {
 fn nssm_exec(file_config: &FileConfig) -> Result<()> {
     let pending_stop_poll_interval =
         Duration::from_millis(file_config.pending_stop_poll_ms.unwrap_or(
-            PENDING_STOP_POLL_MS_DEF,
+            PENDING_POLL_DEFAULT_MS,
         ));
 
     let pending_stop_poll_count = file_config.pending_stop_poll_count.unwrap_or(
-        PENDING_STOP_POLL_COUNT_DEF,
+        PENDING_POLL_DEFAULT_COUNT,
+    );
+
+    let pending_start_poll_interval =
+        Duration::from_millis(file_config.pending_start_poll_ms.unwrap_or(
+            PENDING_POLL_DEFAULT_MS,
+        ));
+
+    let pending_start_poll_count = file_config.pending_start_poll_count.unwrap_or(
+        PENDING_POLL_DEFAULT_COUNT,
     );
 
     let log_names = file_config
@@ -297,10 +392,10 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
             info!("Creating service '{}'...", service.name);
 
             // ignore if cannot get status, which probably means that the service does not exist yet
-            if let Ok(status) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
+            if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
                 debug!("Service '{}' exists, removing service...", service.name);
 
-                if status != SERVICE_STOPPED_STATUS {
+                if state != ServiceState::Stopped {
                     let stop_cmd = &format!("stop {}", service.name);
 
                     // sometimes the error message happens
@@ -309,7 +404,7 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                     // so allow for this to happen
 
                     let stop_res = run_nssm_cmd(stop_cmd, file_config).chain_service_msg(
-                        "Stopping of service returned error, but temporarily allowing for",
+                        "Service stopping returned error, temporarily allowing this for",
                         &service.name,
                     );
 
@@ -318,11 +413,12 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                     }
 
                     // sometimes it takes a while to stop the service so wait for it
-                    poll_service_status_until_empty(
+                    poll_service_state_until(
                         &service.name,
                         file_config,
                         &pending_stop_poll_interval,
                         pending_stop_poll_count,
+                        ServiceState::Stopped,
                     )?;
                 }
 
@@ -334,21 +430,12 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                 )?;
             }
 
-            // since nssm cannot use relative paths
-            // must canonicalize the app path first
-            let service_path_canon = service.path.canonicalize().chain_service_msg(
-                &format!(
-                    "Unable to canonicalize path '{}' for",
-                    service.path.to_string_lossy()
-                ),
-                &service.name,
-            )?;
-
             // install service first
+            // note that the service path is relative from nssm.exe
             let install_cmd = &format!(
                 "install {} {}",
                 service.name,
-                service_path_canon.to_string_lossy(),
+                service.path.to_string_lossy(),
             );
 
             run_nssm_cmd(install_cmd, file_config).chain_service_msg(
@@ -358,19 +445,11 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
 
             // then set the rest of the parameters
             if let Some(ref startup_dir) = service.startup_dir {
-                // same for app directory
-                let startup_dir_canon = startup_dir.canonicalize().chain_service_msg(
-                    &format!(
-                        "Unable to canonicalize startup directory path '{}' for",
-                        startup_dir.to_string_lossy(),
-                    ),
-                    &service.name,
-                )?;
-
+                // app directory is also relative from nssm.exe
                 let app_dir_cmd = &format!(
                     "{} AppDirectory {}",
                     service.name,
-                    startup_dir_canon.to_string_lossy()
+                    startup_dir.to_string_lossy()
                 );
 
                 run_nssm_set_cmd(app_dir_cmd, file_config)
@@ -419,21 +498,33 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
                         r#""""#
                     }
                 );
+
                 run_nssm_set_cmd(acct_cmd, file_config).chain_service_msg(
                     "Unable to set the username and password for",
                     &service.name,
                 )?;
             }
 
-            if let Some(start_on_create) = merged_other.start_on_create {
-                if *start_on_create {
-                    let start_cmd = &format!("start {}", service.name);
+            if let Some(&true) = merged_other.start_on_create {
+                let start_cmd = &format!("start {}", service.name);
 
-                    run_nssm_cmd(start_cmd, file_config).chain_service_msg(
-                        "Unable to start",
-                        &service.name,
-                    )?;
+                let start_res = run_nssm_cmd(start_cmd, file_config).chain_service_msg(
+                    "Service starting returned error, temporarily allowing this for",
+                    &service.name,
+                );
+
+                if let Err(e) = start_res {
+                    print_recursive_warning(&e);
                 }
+
+                // may take some time to start the service
+                poll_service_state_until(
+                    &service.name,
+                    file_config,
+                    &pending_start_poll_interval,
+                    pending_start_poll_count,
+                    ServiceState::Running,
+                )?;
             }
 
             Ok(())
