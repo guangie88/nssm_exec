@@ -1,5 +1,7 @@
 # nssm_exec
-Utility wrapper program around [`nssm`](https://nssm.cc/) to run nssm commands to add services more easily, based on predefined TOML configuration. This allows for rapid stopping and recreating of predefined services using `nssm` via command line, which could be useful development and deployment.
+For Windows environment only.
+
+Utility wrapper program around [`nssm`](https://nssm.cc/) to run nssm commands to add Windows services more easily, based on predefined TOML configuration. This allows for rapid stopping and recreating of predefined services using `nssm` via command line, which could be useful development and deployment.
 
 [![Build status](https://ci.appveyor.com/api/projects/status/j90hd2yis46tcw31/branch/master?svg=true)](https://ci.appveyor.com/project/guangie88/nssm-exec/branch/master)
 
@@ -11,7 +13,7 @@ Assuming `config\nssm_exec.toml`, `third-party\five_ctrl_c.exe` and `nssm.exe` a
 
 For a more practical set-up, the `config\nssm_exec.toml` file must be reconfigured.
 
-For more arguments help, run `target\release\nssm_exec.exe --help`. Note that the program has an additional subcommand `stop` to perform only stopping of the services listed in the TOML configuration.
+For more arguments help, run `target\release\nssm_exec.exe --help`. Note that the program has additional subcommands `stop` and `remove` to respectively perform stopping and removal of the listed services in the TOML configuration.
 
 ## TOML Example Configuration
 The configuration file ([`config\nssm_exec.toml`](https://github.com/guangie88/nssm_exec/blob/master/config/nssm_exec.toml)) has the entire Rust data structures with comments to describe what each field does and whether it is optional.

@@ -20,10 +20,12 @@ extern crate toml;
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::iter::{Map, Zip};
 use std::thread;
-use std::time::Duration;
 use std::path::PathBuf;
 use std::process::{self, Command, Output};
+use std::slice::Iter;
+use std::time::Duration;
 use structopt::StructOpt;
 
 struct OtherConfigRef<'a, 'b, 'c> {
@@ -134,8 +136,12 @@ struct MainConfig {
 #[derive(StructOpt, Debug)]
 enum CustomCmd {
     #[structopt(name = "stop")]
-    /// Only runs the stop command on the services in the TOML configuration
+    /// Only stops the services in the TOML configuration
     Stop,
+
+    #[structopt(name = "remove")]
+    /// Only stops and removes the services in the TOML configuration.
+    Remove,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -374,7 +380,6 @@ fn do_service_stop(
     pending_stop_poll_interval: &Duration,
     pending_stop_poll_count: u64,
 ) -> Result<()> {
-
     if state != ServiceState::Stopped {
         let stop_cmd = &format!("stop {}", service_name);
 
@@ -401,6 +406,17 @@ fn do_service_stop(
             ServiceState::Stopped,
         )?;
     }
+
+    Ok(())
+}
+
+fn do_service_remove(service_name: &str, file_config: &FileConfig) -> Result<()> {
+    let remove_cmd = &format!("remove {} confirm", service_name);
+
+    run_nssm_cmd(remove_cmd, file_config).chain_service_msg(
+        "Unable to remove",
+        service_name,
+    )?;
 
     Ok(())
 }
@@ -437,35 +453,78 @@ fn print_recursive_err(e: &Error) {
     }
 }
 
+fn name_from_service(service: &Service) -> &str {
+    service.name.as_str()
+}
+
+fn nssm_exec_wrap<'a, F>(
+    file_config: &'a FileConfig,
+    f: F,
+) -> Zip<Map<Iter<'a, Service>, F>, Map<Iter<'a, Service>, fn(&'a Service) -> &'a str>>
+where
+    F: Fn(&'a Service) -> Result<()>,
+{
+    let name_from_service = name_from_service as fn(&'a Service) -> &'a str;
+
+    file_config.services.iter().map(f).zip(
+        file_config.services.iter().map(name_from_service),
+    )
+}
+
 fn nssm_exec_stop(
     file_config: &FileConfig,
     pending_stop_poll_interval: &Duration,
     pending_stop_poll_count: u64,
 ) -> Result<()> {
-    let log_names = file_config
-        .services
-        .iter()
-        .map(|service| -> Result<()> {
-            if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
-                debug!(
-                    "Service '{}' exists, attempting to stop service...",
-                    service.name
-                );
+    let log_names = nssm_exec_wrap(file_config, |service| {
+        if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
+            debug!(
+                "Service '{}' exists, attempting to stop service...",
+                service.name
+            );
 
-                do_service_stop(
-                    &service.name,
-                    file_config,
-                    state,
-                    &pending_stop_poll_interval,
-                    pending_stop_poll_count,
-                )?;
-            }
+            do_service_stop(
+                &service.name,
+                file_config,
+                state,
+                &pending_stop_poll_interval,
+                pending_stop_poll_count,
+            )?;
+        }
 
-            Ok(())
-        })
-        .zip(file_config.services.iter().map(
-            |service| service.name.as_str(),
-        ));
+        Ok(())
+    });
+
+    log_service_status(log_names);
+    Ok(())
+}
+
+fn nssm_exec_remove(
+    file_config: &FileConfig,
+    pending_stop_poll_interval: &Duration,
+    pending_stop_poll_count: u64,
+) -> Result<()> {
+    let log_names = nssm_exec_wrap(file_config, |service| {
+        if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
+            debug!(
+                "Service '{}' exists, attempting to stop service first...",
+                service.name
+            );
+
+            do_service_stop(
+                &service.name,
+                file_config,
+                state,
+                &pending_stop_poll_interval,
+                pending_stop_poll_count,
+            )?;
+
+            debug!("Next attempting to remove service '{}'...", service.name);
+            do_service_remove(&service.name, file_config)?;
+        }
+
+        Ok(())
+    });
 
     log_service_status(log_names);
     Ok(())
@@ -478,138 +537,127 @@ fn nssm_exec(
     pending_start_poll_interval: &Duration,
     pending_start_poll_count: u64,
 ) -> Result<()> {
-    let log_names = file_config
-        .services
-        .iter()
-        .map(|service| -> Result<()> {
-            info!("Creating service '{}'...", service.name);
+    let log_names = nssm_exec_wrap(file_config, |service| {
+        info!("Creating service '{}'...", service.name);
 
-            // ignore if cannot get status, which probably means that the service does not exist yet
-            if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
-                debug!(
-                    "Service '{}' exists, attempting to stop service first...",
-                    service.name
-                );
-
-                do_service_stop(
-                    &service.name,
-                    file_config,
-                    state,
-                    &pending_stop_poll_interval,
-                    pending_stop_poll_count,
-                )?;
-
-                debug!("Next attempting to remove service '{}'...", service.name);
-                let remove_cmd = &format!("remove {} confirm", service.name);
-
-                run_nssm_cmd(remove_cmd, file_config).chain_service_msg(
-                    "Unable to remove",
-                    &service.name,
-                )?;
-            }
-
-            // install service first
-            // note that the service path is relative from nssm.exe
-            let install_cmd = &format!(
-                "install {} {}",
-                service.name,
-                service.path.to_string_lossy(),
+        // ignore if cannot get status, which probably means that the service does not exist yet
+        if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
+            debug!(
+                "Service '{}' exists, attempting to stop service first...",
+                service.name
             );
 
-            run_nssm_cmd(install_cmd, file_config).chain_service_msg(
-                "Unable to install",
+            do_service_stop(
                 &service.name,
-            )?;
-
-            // then set the rest of the parameters
-            if let Some(ref startup_dir) = service.startup_dir {
-                // app directory is also relative from nssm.exe
-                let app_dir_cmd = &format!(
-                    "{} AppDirectory {}",
-                    service.name,
-                    startup_dir.to_string_lossy()
-                );
-
-                run_nssm_set_cmd(app_dir_cmd, file_config)
-                    .chain_service_msg("Unable to set startup directory for", &service.name)?;
-            }
-
-            run_nssm_set_cmd_if_some(&service.name, "AppParameters", &service.args, file_config)?;
-
-            run_nssm_set_cmd_if_some(
-                &service.name,
-                "Description",
-                &service.description,
                 file_config,
+                state,
+                &pending_stop_poll_interval,
+                pending_stop_poll_count,
             )?;
 
-            // merges the options, prioritizing the local ones if available individually
-            let merged_other = OtherConfigRef {
-                deps: merge_other_conf(
-                    &service.other,
-                    &file_config.global,
-                    |other| other.deps.as_ref(),
-                ),
-                start_on_create: merge_other_conf(&service.other, &file_config.global, |other| {
-                    other.start_on_create.as_ref()
-                }),
-                account: merge_other_conf(&service.other, &file_config.global, |other| {
-                    other.account.as_ref()
-                }),
-            };
+            debug!("Next attempting to remove service '{}'...", service.name);
+            do_service_remove(&service.name, file_config)?;
+        }
 
-            run_nssm_set_cmd_if_some(
-                &service.name,
-                "DependOnService",
-                &merged_other.deps,
-                file_config,
-            )?;
+        // install service first
+        // note that the service path is relative from nssm.exe
+        let install_cmd = &format!(
+            "install {} {}",
+            service.name,
+            service.path.to_string_lossy(),
+        );
 
-            if let Some(account) = merged_other.account {
-                let acct_cmd = &format!(
-                    "{} ObjectName {} {}",
-                    service.name,
-                    account.user,
-                    if !account.password.is_empty() {
-                        &account.password
-                    } else {
-                        r#""""#
-                    }
-                );
+        run_nssm_cmd(install_cmd, file_config).chain_service_msg(
+            "Unable to install",
+            &service.name,
+        )?;
 
-                run_nssm_set_cmd(acct_cmd, file_config).chain_service_msg(
-                    "Unable to set the username and password for",
-                    &service.name,
-                )?;
-            }
+        // then set the rest of the parameters
+        if let Some(ref startup_dir) = service.startup_dir {
+            // app directory is also relative from nssm.exe
+            let app_dir_cmd = &format!(
+                "{} AppDirectory {}",
+                service.name,
+                startup_dir.to_string_lossy()
+            );
 
-            if let Some(&true) = merged_other.start_on_create {
-                let start_cmd = &format!("start {}", service.name);
+            run_nssm_set_cmd(app_dir_cmd, file_config)
+                .chain_service_msg("Unable to set startup directory for", &service.name)?;
+        }
 
-                let start_res = run_nssm_cmd(start_cmd, file_config).chain_service_msg(
-                    "Service starting returned error, temporarily allowing this for",
-                    &service.name,
-                );
+        run_nssm_set_cmd_if_some(&service.name, "AppParameters", &service.args, file_config)?;
 
-                if let Err(e) = start_res {
-                    print_recursive_warning(&e);
+        run_nssm_set_cmd_if_some(
+            &service.name,
+            "Description",
+            &service.description,
+            file_config,
+        )?;
+
+        // merges the options, prioritizing the local ones if available individually
+        let merged_other = OtherConfigRef {
+            deps: merge_other_conf(
+                &service.other,
+                &file_config.global,
+                |other| other.deps.as_ref(),
+            ),
+            start_on_create: merge_other_conf(&service.other, &file_config.global, |other| {
+                other.start_on_create.as_ref()
+            }),
+            account: merge_other_conf(&service.other, &file_config.global, |other| {
+                other.account.as_ref()
+            }),
+        };
+
+        run_nssm_set_cmd_if_some(
+            &service.name,
+            "DependOnService",
+            &merged_other.deps,
+            file_config,
+        )?;
+
+        if let Some(account) = merged_other.account {
+            let acct_cmd = &format!(
+                "{} ObjectName {} {}",
+                service.name,
+                account.user,
+                if !account.password.is_empty() {
+                    &account.password
+                } else {
+                    r#""""#
                 }
+            );
 
-                // may take some time to start the service
-                poll_service_state_until(
-                    &service.name,
-                    file_config,
-                    &pending_start_poll_interval,
-                    pending_start_poll_count,
-                    ServiceState::Running,
-                )?;
+            run_nssm_set_cmd(acct_cmd, file_config).chain_service_msg(
+                "Unable to set the username and password for",
+                &service.name,
+            )?;
+        }
+
+        if let Some(&true) = merged_other.start_on_create {
+            let start_cmd = &format!("start {}", service.name);
+
+            let start_res = run_nssm_cmd(start_cmd, file_config).chain_service_msg(
+                "Service starting returned error, temporarily allowing this for",
+                &service.name,
+            );
+
+            if let Err(e) = start_res {
+                print_recursive_warning(&e);
             }
 
-            Ok(())
-        })
-        .zip(file_config.services.iter().map(
-            |service| service.name.as_str(),
-        ));
+            // may take some time to start the service
+            poll_service_state_until(
+                &service.name,
+                file_config,
+                &pending_start_poll_interval,
+                pending_start_poll_count,
+                ServiceState::Running,
+            )?;
+        }
+
+        Ok(())
+    });
 
     log_service_status(log_names);
     Ok(())
@@ -663,6 +711,14 @@ fn run() -> Result<()> {
                 &pending_stop_poll_interval,
                 pending_stop_poll_count,
             ).chain_err(|| "Unable to complete all nssm stop operations")
+        }
+
+        Some(CustomCmd::Remove) => {
+            nssm_exec_remove(
+                &file_config,
+                &pending_stop_poll_interval,
+                pending_stop_poll_count,
+            ).chain_err(|| "Unable to complete all nssm remove operations")
         }
 
         None => {
