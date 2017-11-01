@@ -1,4 +1,5 @@
 nssm_path = 'third-party\nssm.exe'
+
 pending_stop_poll_ms = 500
 pending_stop_poll_count = 10
 pending_start_poll_ms = 500
@@ -30,7 +31,7 @@ description = "This is program A"
 [[services]]
 name = "_B"
 path = 'five_ctrl_c.exe'
-args = "noeffect"
+args = 'noeffect'
 
 [[services]]
 name = "_C"

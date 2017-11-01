@@ -11,7 +11,7 @@ Assuming `config\nssm_exec.toml`, `third-party\five_ctrl_c.exe` and `nssm.exe` a
 
 For a more practical set-up, the `config\nssm_exec.toml` file must be reconfigured.
 
-For more arguments help, run `target\release\nssm_exec.exe --help`.
+For more arguments help, run `target\release\nssm_exec.exe --help`. Note that the program has an additional subcommand `stop` to perform only stopping of the services listed in the TOML configuration.
 
 ## TOML Example Configuration
 The configuration file ([`config\nssm_exec.toml`](https://github.com/guangie88/nssm_exec/blob/master/config/nssm_exec.toml)) has the entire Rust data structures with comments to describe what each field does and whether it is optional.

@@ -337,9 +337,10 @@ fn poll_service_state_until(
 
     if !state_reached {
         bail!(
-            "Unable to wait for service name '{}' to stop completely",
-            service_name
-        )
+            "Timeout waiting for service name '{}' to be in state {:?}",
+            service_name,
+            expected_state
+        );
     }
 
     Ok(())
@@ -366,25 +367,117 @@ fn remove_zeros(bytes: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-fn nssm_exec(file_config: &FileConfig) -> Result<()> {
-    let pending_stop_poll_interval =
-        Duration::from_millis(file_config.pending_stop_poll_ms.unwrap_or(
-            PENDING_POLL_DEFAULT_MS,
+fn do_service_stop(
+    service_name: &str,
+    file_config: &FileConfig,
+    state: ServiceState,
+    pending_stop_poll_interval: &Duration,
+    pending_stop_poll_count: u64,
+) -> Result<()> {
+
+    if state != ServiceState::Stopped {
+        let stop_cmd = &format!("stop {}", service_name);
+
+        // sometimes the error message happens
+        // "Unexpected status SERVICE_STOP_PENDING in response to STOP control"
+        // even though the service will eventually stop
+        // so allow for this to happen
+
+        let stop_res = run_nssm_cmd(stop_cmd, file_config).chain_service_msg(
+            "Service stopping returned error, temporarily allowing this for",
+            service_name,
+        );
+
+        if let Err(e) = stop_res {
+            print_recursive_warning(&e);
+        }
+
+        // sometimes it takes a while to stop the service so wait for it
+        poll_service_state_until(
+            service_name,
+            file_config,
+            &pending_stop_poll_interval,
+            pending_stop_poll_count,
+            ServiceState::Stopped,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn log_service_status<'a, I>(log_names: I)
+where
+    I: Iterator<Item = (Result<()>, &'a str)>,
+{
+
+    for (log, name) in log_names {
+        match log {
+            Ok(_) => info!("Service '{}' [OK]", name),
+            Err(e) => {
+                error!("Service '{}' [FAILED]", name);
+                print_recursive_err(&e);
+            }
+        }
+    }
+}
+
+fn print_recursive_warning(e: &Error) {
+    warn!("WARNING: {}", e);
+
+    for e in e.iter().skip(1) {
+        warn!("> Caused by: {}", e);
+    }
+}
+
+fn print_recursive_err(e: &Error) {
+    error!("ERROR: {}", e);
+
+    for e in e.iter().skip(1) {
+        error!("> Caused by: {}", e);
+    }
+}
+
+fn nssm_exec_stop(
+    file_config: &FileConfig,
+    pending_stop_poll_interval: &Duration,
+    pending_stop_poll_count: u64,
+) -> Result<()> {
+    let log_names = file_config
+        .services
+        .iter()
+        .map(|service| -> Result<()> {
+            if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
+                debug!(
+                    "Service '{}' exists, attempting to stop service...",
+                    service.name
+                );
+
+                do_service_stop(
+                    &service.name,
+                    file_config,
+                    state,
+                    &pending_stop_poll_interval,
+                    pending_stop_poll_count,
+                )?;
+            }
+
+            Ok(())
+        })
+        .zip(file_config.services.iter().map(
+            |service| service.name.as_str(),
         ));
 
-    let pending_stop_poll_count = file_config.pending_stop_poll_count.unwrap_or(
-        PENDING_POLL_DEFAULT_COUNT,
-    );
+    log_service_status(log_names);
+    Ok(())
+}
 
-    let pending_start_poll_interval =
-        Duration::from_millis(file_config.pending_start_poll_ms.unwrap_or(
-            PENDING_POLL_DEFAULT_MS,
-        ));
-
-    let pending_start_poll_count = file_config.pending_start_poll_count.unwrap_or(
-        PENDING_POLL_DEFAULT_COUNT,
-    );
-
+fn nssm_exec(
+    file_config: &FileConfig,
+    pending_stop_poll_interval: &Duration,
+    pending_stop_poll_count: u64,
+    pending_start_poll_interval: &Duration,
+    pending_start_poll_count: u64,
+) -> Result<()> {
     let log_names = file_config
         .services
         .iter()
@@ -393,35 +486,20 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
 
             // ignore if cannot get status, which probably means that the service does not exist yet
             if let Ok(state) = run_nssm_status_cmd_extract_status(&service.name, file_config) {
-                debug!("Service '{}' exists, removing service...", service.name);
+                debug!(
+                    "Service '{}' exists, attempting to stop service first...",
+                    service.name
+                );
 
-                if state != ServiceState::Stopped {
-                    let stop_cmd = &format!("stop {}", service.name);
+                do_service_stop(
+                    &service.name,
+                    file_config,
+                    state,
+                    &pending_stop_poll_interval,
+                    pending_stop_poll_count,
+                )?;
 
-                    // sometimes the error message happens
-                    // "Unexpected status SERVICE_STOP_PENDING in response to STOP control"
-                    // even though the service will eventually stop
-                    // so allow for this to happen
-
-                    let stop_res = run_nssm_cmd(stop_cmd, file_config).chain_service_msg(
-                        "Service stopping returned error, temporarily allowing this for",
-                        &service.name,
-                    );
-
-                    if let Err(e) = stop_res {
-                        print_recursive_warning(&e);
-                    }
-
-                    // sometimes it takes a while to stop the service so wait for it
-                    poll_service_state_until(
-                        &service.name,
-                        file_config,
-                        &pending_stop_poll_interval,
-                        pending_stop_poll_count,
-                        ServiceState::Stopped,
-                    )?;
-                }
-
+                debug!("Next attempting to remove service '{}'...", service.name);
                 let remove_cmd = &format!("remove {} confirm", service.name);
 
                 run_nssm_cmd(remove_cmd, file_config).chain_service_msg(
@@ -529,19 +607,11 @@ fn nssm_exec(file_config: &FileConfig) -> Result<()> {
 
             Ok(())
         })
-        .zip(file_config.services.iter().map(|service| &service.name));
+        .zip(file_config.services.iter().map(
+            |service| service.name.as_str(),
+        ));
 
-    // detailed logging
-    for (log, name) in log_names {
-        match log {
-            Ok(_) => info!("Service '{}' [OK]", name),
-            Err(e) => {
-                error!("Service '{}' [FAILED]", name);
-                print_recursive_err(&e);
-            }
-        }
-    }
-
+    log_service_status(log_names);
     Ok(())
 }
 
@@ -577,26 +647,42 @@ fn run() -> Result<()> {
         || "Unable to interpret configuration file content as TOML",
     )?;
 
-    nssm_exec(&file_config).chain_err(
-        || "Unable to complete all nssm operations",
-    )?;
+    let pending_stop_poll_interval =
+        Duration::from_millis(file_config.pending_stop_poll_ms.unwrap_or(
+            PENDING_POLL_DEFAULT_MS,
+        ));
 
-    Ok(())
-}
+    let pending_stop_poll_count = file_config.pending_stop_poll_count.unwrap_or(
+        PENDING_POLL_DEFAULT_COUNT,
+    );
 
-fn print_recursive_warning(e: &Error) {
-    warn!("WARNING: {}", e);
+    match config.cmd {
+        Some(CustomCmd::Stop) => {
+            nssm_exec_stop(
+                &file_config,
+                &pending_stop_poll_interval,
+                pending_stop_poll_count,
+            ).chain_err(|| "Unable to complete all nssm stop operations")
+        }
 
-    for e in e.iter().skip(1) {
-        warn!("> Caused by: {}", e);
-    }
-}
+        None => {
+            let pending_start_poll_interval =
+                Duration::from_millis(file_config.pending_start_poll_ms.unwrap_or(
+                    PENDING_POLL_DEFAULT_MS,
+                ));
 
-fn print_recursive_err(e: &Error) {
-    error!("ERROR: {}", e);
+            let pending_start_poll_count = file_config.pending_start_poll_count.unwrap_or(
+                PENDING_POLL_DEFAULT_COUNT,
+            );
 
-    for e in e.iter().skip(1) {
-        error!("> Caused by: {}", e);
+            nssm_exec(
+                &file_config,
+                &pending_stop_poll_interval,
+                pending_stop_poll_count,
+                &pending_start_poll_interval,
+                pending_start_poll_count,
+            ).chain_err(|| "Unable to complete all nssm operations")
+        }
     }
 }
 
